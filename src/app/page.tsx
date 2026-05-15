@@ -75,7 +75,7 @@ export default function Home() {
       const res = await fetch("/api/scrape-apify", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ urls: urlList }),
+        body: JSON.stringify({ urls: withAmazonUrls.map(p => p.url) }),
       });
 
       const data = await res.json();
@@ -154,7 +154,7 @@ export default function Home() {
       );
     } finally {
       setScraping(false);
-      setScrapeProgress({ current: urlList.length, total: urlList.length });
+      setScrapeProgress({ current: withAmazonUrls.length, total: withAmazonUrls.length });
     }
   }, [urls]);
 
