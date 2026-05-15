@@ -184,7 +184,7 @@ async function waitForRun(runId: string): Promise<string> {
  */
 async function getDatasetItems(datasetId: string): Promise<ApifyProductResult[]> {
   const res = await fetch(
-    `${BASE_URL}/v2/datasets/${datasetId}/items?token=${APIFY_TOKEN}&format=json&clean=true`
+    `${BASE_URL}/datasets/${datasetId}/items?token=${APIFY_TOKEN}&format=json&clean=true`
   );
   if (!res.ok) {
     throw new Error(
