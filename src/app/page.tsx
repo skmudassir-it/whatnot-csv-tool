@@ -16,6 +16,12 @@ interface ProductEntry {
   manualTitle: string;
   manualPrice: string;
   condition: string;
+  // Apify-enriched fields
+  weightDisplay?: string;
+  stars?: number | null;
+  reviewsCount?: number | null;
+  brand?: string | null;
+  inStock?: boolean;
 }
 
 export default function Home() {
@@ -25,24 +31,37 @@ export default function Home() {
   const [scrapeProgress, setScrapeProgress] = useState({ current: 0, total: 0 });
 
   const handleSubmitUrls = useCallback(async () => {
-    const urlList = urls
+    // Parse lines: "URL | quantity | weight" or just "URL"
+    const lines = urls
       .split("\n")
       .map((u) => u.trim())
-      .filter((u) => u && u.includes("amazon."));
+      .filter((u) => u.length > 0);
 
-    if (urlList.length === 0) {
+    const parsed = lines.map((line) => {
+      const parts = line.split("|").map((s) => s.trim());
+      const url = parts[0] || "";
+      const qty = parseInt(parts[1]) || 1;
+      const weightInput = parts[2] || "";
+      const parsedWeight = weightInput ? parseWeight(weightInput) : null;
+      return { url, quantity: qty, weightInput, weightOz: parsedWeight?.ounces || 0 };
+    });
+
+    const withAmazonUrls = parsed.filter((p) => p.url.includes("amazon."));
+
+    if (withAmazonUrls.length === 0) {
       alert("Please paste at least one valid Amazon URL.");
       return;
     }
 
-    const initial: ProductEntry[] = urlList.map((url) => ({
-      url,
+    // Set all entries to loading with pre-filled quantity/weight
+    const initial: ProductEntry[] = withAmazonUrls.map((p) => ({
+      url: p.url,
       product: null,
       loading: true,
       error: null,
-      quantity: 1,
-      weightInput: "",
-      weightOz: 0,
+      quantity: p.quantity,
+      weightInput: p.weightInput,
+      weightOz: p.weightOz,
       manualTitle: "",
       manualPrice: "",
       condition: "New",
@@ -50,57 +69,93 @@ export default function Home() {
 
     setEntries(initial);
     setScraping(true);
-    setScrapeProgress({ current: 0, total: urlList.length });
+    setScrapeProgress({ current: 0, total: withAmazonUrls.length });
 
-    // Scrape each URL sequentially to avoid rate limiting
-    for (let i = 0; i < urlList.length; i++) {
-      setScrapeProgress({ current: i + 1, total: urlList.length });
-      
-      try {
-        const res = await fetch("/api/scrape", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ url: urlList[i] }),
-        });
+    try {
+      const res = await fetch("/api/scrape-apify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ urls: urlList }),
+      });
 
-        const data = await res.json();
+      const data = await res.json();
 
+      if (data.error) {
+        // Global error — mark all as failed with manual fallback
         setEntries((prev) =>
-          prev.map((e, idx) => {
-            if (idx === i) {
-              if (data.error) {
-                return {
-                  ...e,
-                  loading: false,
-                  error: data.error,
-                  product: data,
-                  manualTitle: data.title || "",
-                  manualPrice: data.priceDisplay || "",
-                };
-              }
+          prev.map((e) => ({
+            ...e,
+            loading: false,
+            error: data.error,
+            product: {
+              title: "Unknown Product",
+              price: null,
+              priceDisplay: "Price not found",
+              imageUrl: "",
+              description: "",
+              asin: "UNKNOWN",
+              url: e.url,
+              category: "",
+            },
+          }))
+        );
+      } else {
+        // Populate from batch results
+        const results = data.results || [];
+        setEntries((prev) =>
+          prev.map((e, i) => {
+            const result = results[i];
+            if (!result || result.error) {
               return {
                 ...e,
                 loading: false,
-                product: data,
-                manualTitle: data.title || "",
-                manualPrice: data.price?.toString() || "",
+                error: result?.error || "Failed to fetch product",
+                product: result || {
+                  title: "Unknown Product",
+                  price: null,
+                  priceDisplay: "Price not found",
+                  imageUrl: "",
+                  description: "",
+                  asin: "UNKNOWN",
+                  url: e.url,
+                  category: "",
+                },
+                manualTitle: result?.title || "",
+                manualPrice: result?.priceDisplay || "",
               };
             }
-            return e;
+            return {
+              ...e,
+              loading: false,
+              product: result,
+              manualTitle: result.title || "",
+              manualPrice: result.price?.toString() || "",
+              // Auto-fill weight from Apify data
+              weightInput: (result as any).weightDisplay || "",
+              weightOz: (result as any).weightDisplay
+                ? parseWeight((result as any).weightDisplay)?.ounces || 0
+                : 0,
+              weightDisplay: (result as any).weightDisplay,
+              stars: (result as any).stars,
+              reviewsCount: (result as any).reviewsCount,
+              brand: (result as any).brand,
+              inStock: (result as any).inStock,
+            };
           })
         );
-      } catch (err: any) {
-        setEntries((prev) =>
-          prev.map((e, idx) =>
-            idx === i
-              ? { ...e, loading: false, error: "Failed to connect to scraper" }
-              : e
-          )
-        );
       }
+    } catch (err: any) {
+      setEntries((prev) =>
+        prev.map((e) => ({
+          ...e,
+          loading: false,
+          error: "Failed to connect to scraper",
+        }))
+      );
+    } finally {
+      setScraping(false);
+      setScrapeProgress({ current: urlList.length, total: urlList.length });
     }
-
-    setScraping(false);
   }, [urls]);
 
   const updateEntry = useCallback(
@@ -173,13 +228,13 @@ export default function Home() {
           <div>
             <h2 className="text-lg font-semibold mb-1">Paste Amazon URLs</h2>
             <p className="text-sm text-zinc-500">
-              One URL per line. Each product will be scraped for title, price, and images.
+              Format: <code className="bg-zinc-800 px-1 rounded text-purple-400">URL | quantity | weight</code> — one per line
             </p>
           </div>
           <textarea
             value={urls}
             onChange={(e) => setUrls(e.target.value)}
-            placeholder="https://www.amazon.com/dp/B0EXAMPLE1&#10;https://www.amazon.com/dp/B0EXAMPLE2&#10;https://www.amazon.com/dp/B0EXAMPLE3"
+            placeholder={`https://www.amazon.com/dp/B0EXAMPLE1 | 5 | 8 oz\nhttps://www.amazon.com/dp/B0EXAMPLE2 | 2 | 1.5 lbs\nhttps://www.amazon.com/dp/B0EXAMPLE3 | 1 | 4 oz`}
             className="w-full h-32 bg-zinc-950 border border-zinc-700 rounded-xl p-4 text-sm font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-purple-500 focus:ring-1 focus:ring-purple-500/50 resize-y transition-colors"
             disabled={scraping}
           />
@@ -191,7 +246,7 @@ export default function Home() {
             {scraping ? (
               <span className="flex items-center gap-2">
                 <Spinner />
-                Scraping ({scrapeProgress.current}/{scrapeProgress.total})
+                Scraping via Apify...
               </span>
             ) : (
               "🔍 Scrape Products"
@@ -363,6 +418,24 @@ function ProductCard({
                 <p className="text-xs text-amber-400/70 mt-1">
                   ⚠️ Partial data — verify before exporting
                 </p>
+              )}
+              {/* Apify-enriched details */}
+              {entry.stars && (
+                <div className="flex items-center gap-2 mt-1.5">
+                  <span className="text-yellow-400 text-xs">{"★".repeat(Math.round(entry.stars))}</span>
+                  <span className="text-xs text-zinc-400">{entry.stars}</span>
+                  {entry.reviewsCount && (
+                    <span className="text-xs text-zinc-500">({entry.reviewsCount.toLocaleString()} reviews)</span>
+                  )}
+                </div>
+              )}
+              {entry.brand && (
+                <p className="text-xs text-zinc-500 mt-0.5">by {entry.brand}</p>
+              )}
+              {entry.inStock !== undefined && (
+                <span className={`text-xs mt-1 inline-block ${entry.inStock ? "text-green-400" : "text-red-400"}`}>
+                  {entry.inStock ? "● In Stock" : "○ Out of Stock"}
+                </span>
               )}
             </div>
 
